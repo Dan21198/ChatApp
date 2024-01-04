@@ -23,12 +23,26 @@ import com.example.chatapp.manager.WebSocketManager
 import com.example.chatapp.model.ChatDTO
 import com.example.chatapp.model.ChatMessage
 import com.example.chatapp.model.ChatRoom
+import com.google.gson.Gson
+import com.google.gson.JsonSyntaxException
+import com.google.gson.reflect.TypeToken
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
+import org.json.JSONArray
+import org.json.JSONException
+import org.json.JSONObject
 import retrofit2.Call
 import retrofit2.Callback
 import retrofit2.Response
+import java.io.IOException
 
 
-class ChatActivity : AppCompatActivity(), MessageListener {
+class ChatActivity : AppCompatActivity(){
 
     private lateinit var textOutput: TextView
     private lateinit var textInput: EditText
@@ -45,6 +59,8 @@ class ChatActivity : AppCompatActivity(), MessageListener {
     private lateinit var exchangeManager: ExchangeManager
     private val chatMessagesMap: MutableMap<Long, MutableList<String>> = mutableMapOf()
     private lateinit var webSocketManager: WebSocketManager
+    private val okHttpClient = OkHttpClient()
+    private lateinit var webSocket: WebSocket
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -73,68 +89,133 @@ class ChatActivity : AppCompatActivity(), MessageListener {
         initializeRetrofit()
         initializeViews()
 
-        messageManager = MessageManager(apiService)
-        exchangeManager = ExchangeManager(apiService)
-        webSocketManager = WebSocketManager(this)
-
-        /*webSocketManager = WebSocketManager()
-        val webSocketUrl = "ws://10.0.2.2:8080/ws-message/websocket"
-        val accessToken = TokenManager.getAccessToken() ?: ""
-        webSocketManager.connectWebSocket(webSocketUrl, accessToken)
-
-        webSocketManager.setMessageListener { message ->
-            Log.d("ChatActivity", "Received message in ChatActivity: $message")
+        TokenManager.getAccessToken()?.let { accessToken ->
+            CoroutineScope(Dispatchers.IO).launch {
+                initializeWebSocket(accessToken)
+            }
         }
 
-        webSocketManager.fetchQueuesAndSubscribe(apiService)*/
+        messageManager = MessageManager(apiService)
+        exchangeManager = ExchangeManager(apiService)
+        //webSocketManager = WebSocketManager(okHttpClient)
 
-        fetchQueuesAndInitializeWebSocket()
         fetchExchanges()
         setupCreateRoomClickListener()
         setupButtonClickListener()
         setupChatRoomClickListener()
-        //fetchAndSubscribeToQueues()
-        //connectWebSocket()
     }
 
-    private fun fetchQueuesAndInitializeWebSocket() {
-        apiService.getQueues().enqueue(object : Callback<List<String>> {
-            override fun onResponse(call: Call<List<String>>, response: Response<List<String>>) {
-                if (response.isSuccessful) {
-                    val queues = response.body()
-                    queues?.let {
-                        val webSocketManager = WebSocketManager(this@ChatActivity)
-                        val webSocketUrl = "ws://10.0.2.2:8080/ws-message/websocket"
-                        val accessToken = TokenManager.getAccessToken() ?: ""
-                        webSocketManager.connectWebSocket(webSocketUrl, accessToken, it)
-                    }
+    suspend fun initializeWebSocket(token: String) {
+        try {
+            val request = Request.Builder()
+                .url("http://10.0.2.2:8080/api/chat/exchanges")
+                .addHeader("Authorization", "Bearer $token")
+                .build()
+
+            okHttpClient.newCall(request).execute().use { response ->
+                val responseBody = response.body()?.string()
+                if (response.isSuccessful && responseBody != null) {
+                    val chats: List<ChatDTO> = parseResponseToChatDTOList(responseBody)
+                    connectWebSocket(token, chats)
                 } else {
-                    Log.e("WebSocketManager", "Failed to fetch queues: ${response.code()}")
+                    val message = response.message()
+                    Log.e("WebSocketManager", "Failed to fetch chats: $message")
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("WebSocketManager", "Error fetching queues: $e")
+        }
+    }
+
+    fun parseResponseToChatDTOList(responseBody: String): List<ChatDTO> {
+        return Gson().fromJson(responseBody, object : TypeToken<List<ChatDTO>>() {}.type)
+    }
+
+    fun connectWebSocket(token: String, data: List<ChatDTO>) {
+        val request = Request.Builder()
+            .url("ws://10.0.2.2:8080/ws-message/websocket")
+            .addHeader("Authorization", "Bearer $token")
+            .build()
+
+        val subscriptionMessages = mutableListOf<String>()
+        val expectedSubscriptionAcks = mutableSetOf<String>()
+
+        val webSocket = okHttpClient.newWebSocket(request, object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: okhttp3.Response) {
+                super.onOpen(webSocket, response)
+                Log.d("WebSocketManager", "WebSocket connection opened")
+                subscribeToMessages(webSocket, subscriptionMessages, expectedSubscriptionAcks, data)
+            }
+
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                try {
+                    val chatMessage = Gson().fromJson(text, ChatMessage::class.java)
+
+                    Log.d("WebSocketManager", "Received message: $chatMessage")
+                    runOnUiThread {
+                        displayMessageForSelectedChatRoom(chatMessage.content)
+                    }
+                } catch (e: JsonSyntaxException) {
+                    Log.e("WebSocketManager", "Failed to parse chat message: $text")
                 }
             }
 
-            override fun onFailure(call: Call<List<String>>, t: Throwable) {
-                Log.e("WebSocketManager", "Network error while fetching queues: ${t.message}")
+
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: okhttp3.Response?) {
+                super.onFailure(webSocket, t, response)
+                Log.e("WebSocketManager", "WebSocket failure: ${t.message}")
+
+                response?.let {
+                    Log.e("WebSocketManager", "Response code: ${it.code()}")
+                    Log.e("WebSocketManager", "Response message: ${it.message()}")
+                }
             }
         })
+
+        Log.d("WebSocketManager", "Connecting to WebSocket...")
     }
 
-    override fun onMessageReceived(message: String) {
-        Log.d("ChatActivity", "Received message: $message")
+    fun subscribeToMessages(
+        webSocket: WebSocket,
+        subscriptionMessages: MutableList<String>,
+        expectedSubscriptionAcks: MutableSet<String>,
+        data: List<ChatDTO>
+    ) {
+        Log.d("WebSocketManager", "Initiating subscriptions...")
+
+        data.forEach { chat ->
+            chat.queues.forEach { queue ->
+                val subscriptionMessage = "SUBSCRIBE\nid:sub-123\ndestination:/chat/$queue\n\n\u0000"
+
+                subscriptionMessages.add(subscriptionMessage)
+                expectedSubscriptionAcks.add(subscriptionMessage)
+
+                webSocket.send(subscriptionMessage)
+                Log.d("WebSocketManager", "Sent subscription: $subscriptionMessage")
+            }
+        }
     }
+    override fun onDestroy() {
+        super.onDestroy()
+        webSocket.close(1000, "Activity destroyed")
+    }
+
+
+
+    /*fun subscribeToMessages(webSocket: WebSocket, data: List<ChatDTO>) {
+        data.forEach { chat ->
+            chat.queues.forEach { queue ->
+                val subscriptionMessage = "SUBSCRIBE /chat/$queue"
+                webSocket.send(subscriptionMessage)
+                Log.d("WebSocketManager", "Sent subscription: $subscriptionMessage")
+            }
+        }
+    }*/
 
     private fun initializeRetrofit() {
         TokenManager.initSharedPreferences(this)
         val accessToken = TokenManager.getAccessToken()
         apiService = RetrofitManager.createRetrofitClient(accessToken)
-    }
-
-    private fun connectWebSocket() {
-        val webSocketUrl = "http://10.0.2.2:8080/ws-message"
-        Log.d("ChatActivity", "Connecting to WebSocket")
-        TokenManager.getAccessToken()?.let { token ->
-           // webSocketManager.connectWebSocket(webSocketUrl, token)
-        }
     }
 
     private fun setupCreateRoomClickListener() {
@@ -229,8 +310,10 @@ class ChatActivity : AppCompatActivity(), MessageListener {
     }
 
     private fun displayMessageForSelectedChatRoom(message: String) {
-        updateChatMessages(message)
-        updateChatRoomDisplay(selectedChatRoomId)
+        Log.d("ChatActivity", "Received message: $message")
+        // Update your UI here to display the received message
+        // For example, append the message to your chat view
+        textOutput.append("$message\n")
     }
 
     private fun updateChatMessages(message: String) {
@@ -245,10 +328,10 @@ class ChatActivity : AppCompatActivity(), MessageListener {
         textOutput.text = formattedMessages ?: ""
     }
 
-    override fun onDestroy() {
+   /* override fun onDestroy() {
         super.onDestroy()
         webSocketManager.closeWebSocket()
-    }
+    }*/
 
     private fun displayMessagesForSelectedChatRoom(chatRoomId: Long) {
         val messages = chatMessagesMap[chatRoomId]
