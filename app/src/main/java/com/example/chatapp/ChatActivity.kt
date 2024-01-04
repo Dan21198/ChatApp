@@ -1,6 +1,6 @@
 package com.example.chatapp
 
-import android.content.Context
+
 import android.os.Bundle
 import android.util.Log
 import android.view.View
@@ -14,18 +14,21 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.GravityCompat
 import com.example.chatapp.Adapter.ChatRoomAdapter
 import com.example.chatapp.api.ApiService
+import com.example.chatapp.listener.MessageListener
+import com.example.chatapp.manager.ExchangeManager
+import com.example.chatapp.manager.MessageManager
+import com.example.chatapp.manager.RetrofitManager
+import com.example.chatapp.manager.TokenManager
+import com.example.chatapp.manager.WebSocketManager
 import com.example.chatapp.model.ChatDTO
 import com.example.chatapp.model.ChatMessage
 import com.example.chatapp.model.ChatRoom
-import okhttp3.OkHttpClient
 import retrofit2.Call
 import retrofit2.Callback
 import retrofit2.Response
-import retrofit2.Retrofit
-import retrofit2.converter.gson.GsonConverterFactory
 
 
-class ChatActivity : AppCompatActivity() {
+class ChatActivity : AppCompatActivity(), MessageListener {
 
     private lateinit var textOutput: TextView
     private lateinit var textInput: EditText
@@ -38,8 +41,10 @@ class ChatActivity : AppCompatActivity() {
     private lateinit var chatRoomAdapter: ChatRoomAdapter
     private val listOfChatDTOs: MutableList<ChatDTO> = mutableListOf()
     private var selectedChatRoomId: Long = -1L
-    private var lastSelectedChatRoomId: Long = -1L
+    private lateinit var messageManager: MessageManager
+    private lateinit var exchangeManager: ExchangeManager
     private val chatMessagesMap: MutableMap<Long, MutableList<String>> = mutableMapOf()
+    private lateinit var webSocketManager: WebSocketManager
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -65,49 +70,71 @@ class ChatActivity : AppCompatActivity() {
         chatRoomAdapter = ChatRoomAdapter(this, listOfChatDTOs)
         listViewChatRooms.adapter = chatRoomAdapter
 
-        val accessToken = getStoredAccessToken()
-        val refreshToken = getStoredRefreshToken()
-
-        initializeRetrofit(accessToken)
+        initializeRetrofit()
         initializeViews()
 
-        Log.d("ChatActivity", "Before fetchExchanges()")
+        messageManager = MessageManager(apiService)
+        exchangeManager = ExchangeManager(apiService)
+        webSocketManager = WebSocketManager(this)
+
+        /*webSocketManager = WebSocketManager()
+        val webSocketUrl = "ws://10.0.2.2:8080/ws-message/websocket"
+        val accessToken = TokenManager.getAccessToken() ?: ""
+        webSocketManager.connectWebSocket(webSocketUrl, accessToken)
+
+        webSocketManager.setMessageListener { message ->
+            Log.d("ChatActivity", "Received message in ChatActivity: $message")
+        }
+
+        webSocketManager.fetchQueuesAndSubscribe(apiService)*/
+
+        fetchQueuesAndInitializeWebSocket()
         fetchExchanges()
         setupCreateRoomClickListener()
         setupButtonClickListener()
         setupChatRoomClickListener()
+        //fetchAndSubscribeToQueues()
+        //connectWebSocket()
     }
 
-    private fun initializeRetrofit(accessToken: String?) {
-        val httpClient = OkHttpClient.Builder()
-        if (accessToken != null) {
-            httpClient.addInterceptor { chain ->
-                val original = chain.request()
-                val requestBuilder = original.newBuilder()
-                    .header("Authorization", "Bearer $accessToken")
-                    .method(original.method(), original.body())
-                val request = requestBuilder.build()
-                chain.proceed(request)
+    private fun fetchQueuesAndInitializeWebSocket() {
+        apiService.getQueues().enqueue(object : Callback<List<String>> {
+            override fun onResponse(call: Call<List<String>>, response: Response<List<String>>) {
+                if (response.isSuccessful) {
+                    val queues = response.body()
+                    queues?.let {
+                        val webSocketManager = WebSocketManager(this@ChatActivity)
+                        val webSocketUrl = "ws://10.0.2.2:8080/ws-message/websocket"
+                        val accessToken = TokenManager.getAccessToken() ?: ""
+                        webSocketManager.connectWebSocket(webSocketUrl, accessToken, it)
+                    }
+                } else {
+                    Log.e("WebSocketManager", "Failed to fetch queues: ${response.code()}")
+                }
             }
+
+            override fun onFailure(call: Call<List<String>>, t: Throwable) {
+                Log.e("WebSocketManager", "Network error while fetching queues: ${t.message}")
+            }
+        })
+    }
+
+    override fun onMessageReceived(message: String) {
+        Log.d("ChatActivity", "Received message: $message")
+    }
+
+    private fun initializeRetrofit() {
+        TokenManager.initSharedPreferences(this)
+        val accessToken = TokenManager.getAccessToken()
+        apiService = RetrofitManager.createRetrofitClient(accessToken)
+    }
+
+    private fun connectWebSocket() {
+        val webSocketUrl = "http://10.0.2.2:8080/ws-message"
+        Log.d("ChatActivity", "Connecting to WebSocket")
+        TokenManager.getAccessToken()?.let { token ->
+           // webSocketManager.connectWebSocket(webSocketUrl, token)
         }
-
-        val retrofit = Retrofit.Builder()
-            .baseUrl("http://10.0.2.2:8080")
-            .client(httpClient.build())
-            .addConverterFactory(GsonConverterFactory.create())
-            .build()
-
-        apiService = retrofit.create(ApiService::class.java)
-    }
-
-    private fun getStoredAccessToken(): String? {
-        val sharedPreferences = getSharedPreferences("auth", Context.MODE_PRIVATE)
-        return sharedPreferences.getString("accessToken", null)
-    }
-
-    private fun getStoredRefreshToken(): String? {
-        val sharedPreferences = getSharedPreferences("auth", Context.MODE_PRIVATE)
-        return sharedPreferences.getString("refreshToken", null)
     }
 
     private fun setupCreateRoomClickListener() {
@@ -128,7 +155,10 @@ class ChatActivity : AppCompatActivity() {
                     val createdChatRoom: ChatRoom? = response.body()
                     if (createdChatRoom != null) {
                         if (createdChatRoom.chatName != null) {
-                            Log.d("ChatRoomCreation", "Chat room created: ${createdChatRoom.chatName}")
+                            Log.d(
+                                "ChatRoomCreation",
+                                "Chat room created: ${createdChatRoom.chatName}"
+                            )
                         } else {
                             Log.e("ChatRoomCreation", "Chat name is null")
                         }
@@ -149,25 +179,18 @@ class ChatActivity : AppCompatActivity() {
     }
 
     private fun fetchExchanges() {
-        apiService.getExchanges().enqueue(object : Callback<List<ChatDTO>> {
-            override fun onResponse(call: Call<List<ChatDTO>>, response: Response<List<ChatDTO>>) {
-                if (response.isSuccessful) {
-                    val exchanges = response.body()
-                    exchanges?.let {
-                        listOfChatDTOs.clear()
-                        listOfChatDTOs.addAll(it)
-                        chatRoomAdapter.notifyDataSetChanged()
-                    }
-                } else {
-                    Log.e("ChatActivity", "Failed to fetch exchanges: ${response.code()}")
-                }
+        exchangeManager.fetchExchanges(
+            onSuccess = { exchanges ->
+                listOfChatDTOs.clear()
+                listOfChatDTOs.addAll(exchanges)
+                chatRoomAdapter.notifyDataSetChanged()
+            },
+            onFailure = { errorMessage ->
+                Log.e("ChatActivity", errorMessage)
             }
-
-            override fun onFailure(call: Call<List<ChatDTO>>, t: Throwable) {
-                Log.e("ChatActivity", "Network failure: ${t.message}")
-            }
-        })
+        )
     }
+
 
     private fun setupChatRoomClickListener() {
         listViewChatRooms.setOnItemClickListener { _, _, position, _ ->
@@ -196,7 +219,8 @@ class ChatActivity : AppCompatActivity() {
 
     private fun initializeViews() {
         textOutput = findViewById(R.id.textOutput)
-        textInput = findViewById(R.id.textInput) ?: throw IllegalStateException("textInput not found")
+        textInput =
+            findViewById(R.id.textInput) ?: throw IllegalStateException("textInput not found")
         btnSend = findViewById(R.id.btnSend)
     }
 
@@ -204,39 +228,26 @@ class ChatActivity : AppCompatActivity() {
         return selectedChatRoom?.chat?.owner?.id ?: -1L
     }
 
-    private fun displayMessage(message: String) {
-        val currentText = textOutput.text.toString()
-        val newText = "$currentText\n$message"
-        textOutput.text = newText
-    }
-
-    private fun sendMessage(chatRoomId: Long, senderId: Long, content: String) {
-        val message = ChatMessage(type = "text", chatId = chatRoomId, senderId = senderId, content = content)
-
-        apiService.sendMessage(message).enqueue(object : Callback<Void> {
-            override fun onResponse(call: Call<Void>, response: Response<Void>) {
-                if (response.isSuccessful) {
-                    displayMessageForSelectedChatRoom(content)
-                    textInput.text.clear()
-                } else {
-                    Toast.makeText(this@ChatActivity, "Failed to send message", Toast.LENGTH_SHORT).show()
-                }
-            }
-
-            override fun onFailure(call: Call<Void>, t: Throwable) {
-                Toast.makeText(this@ChatActivity, "Network error", Toast.LENGTH_SHORT).show()
-            }
-        })
-    }
-
     private fun displayMessageForSelectedChatRoom(message: String) {
-        if (selectedChatRoomId != -1L) {
-            if (!chatMessagesMap.containsKey(selectedChatRoomId)) {
-                chatMessagesMap[selectedChatRoomId] = mutableListOf()
-            }
-            chatMessagesMap[selectedChatRoomId]?.add(message)
-            displayMessagesForSelectedChatRoom(selectedChatRoomId)
-        }
+        updateChatMessages(message)
+        updateChatRoomDisplay(selectedChatRoomId)
+    }
+
+    private fun updateChatMessages(message: String) {
+        chatMessagesMap.getOrPut(selectedChatRoomId) { mutableListOf() }.add(message)
+    }
+
+    private fun updateChatRoomDisplay(chatRoomId: Long) {
+
+        val messages = chatMessagesMap[chatRoomId]
+        val formattedMessages = messages?.joinToString("\n")
+
+        textOutput.text = formattedMessages ?: ""
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        webSocketManager.closeWebSocket()
     }
 
     private fun displayMessagesForSelectedChatRoom(chatRoomId: Long) {
@@ -258,6 +269,25 @@ class ChatActivity : AppCompatActivity() {
                 Toast.makeText(this, "Please select a chat room and enter a message", Toast.LENGTH_SHORT).show()
             }
         }
+    }
+
+    private fun sendMessage(chatRoomId: Long, senderId: Long, content: String) {
+        val message = ChatMessage(type = "text", chatId = chatRoomId, senderId = senderId, content = content)
+
+        apiService.sendMessage(message).enqueue(object : Callback<Void> {
+            override fun onResponse(call: Call<Void>, response: Response<Void>) {
+                if (response.isSuccessful) {
+                    displayMessageForSelectedChatRoom(content)
+                    textInput.text.clear()
+                } else {
+                    Toast.makeText(this@ChatActivity, "Failed to send message", Toast.LENGTH_SHORT).show()
+                }
+            }
+
+            override fun onFailure(call: Call<Void>, t: Throwable) {
+                Toast.makeText(this@ChatActivity, "Network error", Toast.LENGTH_SHORT).show()
+            }
+        })
     }
 
 }
