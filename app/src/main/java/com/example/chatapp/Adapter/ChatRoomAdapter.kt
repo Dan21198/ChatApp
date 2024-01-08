@@ -8,7 +8,7 @@ import android.widget.ArrayAdapter
 import android.widget.TextView
 import com.example.chatapp.model.ChatDTO
 
-class ChatRoomAdapter(context: Context, private val chatRooms: List<ChatDTO>) :
+class ChatRoomAdapter(context: Context, private val chatRooms: MutableList<ChatDTO>) :
     ArrayAdapter<ChatDTO>(context, android.R.layout.simple_list_item_1, chatRooms) {
 
     override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {

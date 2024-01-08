@@ -15,7 +15,7 @@ object RetrofitManager {
                 val original = chain.request()
                 val requestBuilder = original.newBuilder()
                     .header("Authorization", "Bearer $accessToken")
-                    .method(original.method(), original.body())
+                    .method(original.method, original.body)
                 val request = requestBuilder.build()
                 chain.proceed(request)
             }

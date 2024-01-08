@@ -1,16 +1,8 @@
 package com.example.chatapp.manager
 
 import android.util.Log
-import com.example.chatapp.ChatActivity
-import com.example.chatapp.api.ApiService
-import com.example.chatapp.listener.MessageListener
-import com.example.chatapp.listener.MyWebSocketListener
-import com.example.chatapp.model.ChatDTO
-import com.example.chatapp.model.ChatMessage
-import retrofit2.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import retrofit2.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONException

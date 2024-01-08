@@ -116,7 +116,7 @@ class LogIn : AppCompatActivity() {
             val request = original.newBuilder()
                 .header("Authorization", "Bearer $accessToken")
                 .header("Refresh-Token", refreshToken ?: "")
-                .method(original.method(), original.body())
+                .method(original.method, original.body)
                 .build()
             chain.proceed(request)
         })

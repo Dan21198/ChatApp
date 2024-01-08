@@ -7,6 +7,12 @@ import org.json.JSONException
 import org.json.JSONObject
 
 class MyWebSocketListener : WebSocketListener() {
+    override fun onOpen(webSocket: WebSocket, response: okhttp3.Response) {
+        super.onOpen(webSocket, response)
+        // Handle WebSocket opened event
+        println("WebSocket opened")
+    }
+
     override fun onMessage(webSocket: WebSocket, text: String) {
         try {
             val body = JSONObject(text)
